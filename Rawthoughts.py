@@ -6,6 +6,7 @@
 
 import json
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -22,34 +23,30 @@ MAGENTA = "\033[95m"
 GRAY    = "\033[90m"
 WHITE   = "\033[97m"
 
-# keyword lists aren't perfect but they don't need to be
+# multi-word phrases are matched first and weighted higher
 CATEGORIES = {
     "TODO": {
-        "color": GREEN,
-        "icon": "✅",
         "keywords": [
-            "need to", "should", "must", "have to", "gotta", "fix", "finish",
-            "buy", "call", "email", "remind", "todo", "to do", "check", "update",
-            "don't forget", "remember", "schedule", "pay", "send", "reply",
+            "need to", "have to", "don't forget", "to do", "gotta", "must",
+            "should", "fix", "finish", "buy", "call", "email", "remind",
+            "todo", "check", "update", "schedule", "pay", "send", "reply",
         ],
     },
     "IDEA": {
-        "color": CYAN,
-        "icon": "💡",
         "keywords": [
-            "what if", "idea", "maybe", "could", "imagine", "would be cool",
-            "app", "project", "build", "create", "make", "feature", "concept",
-            "why not", "potential", "possible", "pitch", "startup", "tool",
+            "what if", "would be cool", "why not", "could be", "idea",
+            "maybe", "could", "imagine", "app", "project", "build", "create",
+            "make", "feature", "concept", "potential", "possible", "pitch",
+            "startup", "tool",
         ],
     },
     "FEELING": {
-        "color": MAGENTA,
-        "icon": "💭",
         "keywords": [
-            "feel", "feeling", "happy", "sad", "angry", "anxious", "worried",
-            "excited", "tired", "stressed", "love", "hate", "miss", "scared",
-            "frustrated", "proud", "grateful", "lonely", "bored", "nervous",
-            "overwhelmed", "calm", "annoyed", "confused", "lost", "hope",
+            "feel like", "feeling", "feel", "happy", "sad", "angry",
+            "anxious", "worried", "excited", "tired", "stressed", "love",
+            "hate", "miss", "scared", "frustrated", "proud", "grateful",
+            "lonely", "bored", "nervous", "overwhelmed", "calm", "annoyed",
+            "confused", "lost", "hope",
         ],
     },
 }
@@ -67,8 +64,11 @@ def classify(text):
     scores = {cat: 0 for cat in CATEGORIES}
     for cat, data in CATEGORIES.items():
         for kw in data["keywords"]:
-            if kw in lower:
-                scores[cat] += 1
+            # use word-boundary-aware matching; multi-word phrases score double
+            pattern = r'\b' + re.escape(kw) + r'\b'
+            matches = re.findall(pattern, lower)
+            weight = 2 if " " in kw else 1
+            scores[cat] += len(matches) * weight
     best = max(scores, key=scores.get)
     return best if scores[best] > 0 else "RANDOM"
 
@@ -138,6 +138,70 @@ def view_by_category(thoughts):
             ts = t["timestamp"][:16].replace("T", " ")
             print(f"  {WHITE}{t['text']}{RESET}  {DIM}{ts}{RESET}")
     print()
+
+
+def search_mode(thoughts):
+    if not thoughts:
+        print(f"\n  {DIM}nothing to search yet.{RESET}\n")
+        return
+    try:
+        query = input(f"\n  {BOLD}search:{RESET} ").strip().lower()
+    except EOFError:
+        return
+    if not query:
+        return
+    results = [t for t in thoughts if query in t["text"].lower()]
+    if not results:
+        print(f"\n  {DIM}no matches for '{query}'{RESET}\n")
+        return
+    print(f"\n  {BOLD}{len(results)} result{'s' if len(results) != 1 else ''} for '{query}':{RESET}\n")
+    # show with original indices so delete works without confusion
+    for i, t in enumerate(reversed(thoughts), 1):
+        if t in results:
+            highlighted = re.sub(
+                f"({re.escape(query)})",
+                f"{YELLOW}\\1{RESET}{WHITE}",
+                t["text"],
+                flags=re.IGNORECASE,
+            )
+            ts = t["timestamp"][:16].replace("T", " ")
+            c, icon = CAT_META.get(t["category"], (WHITE, "•"))
+            tag = f"{c}{BOLD}[{icon} {t['category']}]{RESET}"
+            print(f"  {GRAY}{i:>3}.{RESET} {tag} {WHITE}{highlighted}{RESET}  {DIM}{ts}{RESET}")
+    print()
+
+
+def delete_mode(thoughts):
+    if not thoughts:
+        print(f"\n  {DIM}nothing to delete.{RESET}\n")
+        return
+    view_all(thoughts)
+    try:
+        raw = input(f"  {RED}enter number to delete (or 'cancel'):{RESET} ").strip().lower()
+    except EOFError:
+        return
+    if raw in ("cancel", "c", "q", ""):
+        print(f"  cancelled.\n")
+        return
+    try:
+        idx = int(raw)
+        if not (1 <= idx <= len(thoughts)):
+            raise ValueError
+    except ValueError:
+        print(f"  {RED}invalid number.{RESET}\n")
+        return
+    # view_all shows thoughts in reverse, so map back to original index
+    real_idx = len(thoughts) - idx
+    removed = thoughts[real_idx]
+    c, icon = CAT_META.get(removed["category"], (WHITE, "•"))
+    print(f"\n  {DIM}deleting: {c}{icon}{RESET} {WHITE}{removed['text']}{RESET}")
+    confirm = input(f"  {RED}sure? (yes/no):{RESET} ").strip().lower()
+    if confirm == "yes":
+        thoughts.pop(real_idx)
+        save(thoughts)
+        print(f"  {DIM}gone.{RESET}\n")
+    else:
+        print(f"  cancelled.\n")
 
 
 def stats(thoughts):
@@ -213,8 +277,8 @@ def header(thoughts):
         print(f"  {' · '.join(parts)}  {DIM}({total} total){RESET}\n")
 
     print(f"  {GREEN}d{RESET} dump   {GREEN}v{RESET} view all   {GREEN}c{RESET} by category")
-    print(f"  {GREEN}s{RESET} stats  {GREEN}e{RESET} export     {GREEN}x{RESET} clear")
-    print(f"  {GREEN}q{RESET} quit")
+    print(f"  {GREEN}s{RESET} stats  {GREEN}/{RESET} search     {GREEN}e{RESET} export")
+    print(f"  {GREEN}r{RESET} delete {GREEN}x{RESET} clear      {GREEN}q{RESET} quit")
     print(f"  {GRAY}{'─' * 36}{RESET}")
 
 
@@ -237,6 +301,12 @@ def main():
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "s":
             stats(thoughts)
+            input(f"  {DIM}enter to go back{RESET}")
+        elif choice == "/":
+            search_mode(thoughts)
+            input(f"  {DIM}enter to go back{RESET}")
+        elif choice == "r":
+            delete_mode(thoughts)
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "e":
             export_markdown(thoughts)
