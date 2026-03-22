@@ -8,7 +8,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, date
 
 SAVE_FILE = os.path.join(os.path.dirname(__file__), ".rawthoughts.json")
 
@@ -23,7 +23,6 @@ MAGENTA = "\033[95m"
 GRAY    = "\033[90m"
 WHITE   = "\033[97m"
 
-# multi-word phrases are matched first and weighted higher
 CATEGORIES = {
     "TODO": {
         "keywords": [
@@ -58,13 +57,14 @@ CAT_META = {
     "RANDOM":  (YELLOW,  "🌀"),
 }
 
+PIN_ICON = f"{YELLOW}📌{RESET}"
+
 
 def classify(text):
     lower = text.lower()
     scores = {cat: 0 for cat in CATEGORIES}
     for cat, data in CATEGORIES.items():
         for kw in data["keywords"]:
-            # use word-boundary-aware matching; multi-word phrases score double
             pattern = r'\b' + re.escape(kw) + r'\b'
             matches = re.findall(pattern, lower)
             weight = 2 if " " in kw else 1
@@ -85,11 +85,36 @@ def save(thoughts):
         json.dump(thoughts, f, indent=2)
 
 
+def get_streak(thoughts):
+    """Count consecutive days (ending today) that have at least one thought."""
+    if not thoughts:
+        return 0
+    days = sorted({t["timestamp"][:10] for t in thoughts}, reverse=True)
+    streak = 0
+    check = date.today()
+    for d in days:
+        if date.fromisoformat(d) == check:
+            streak += 1
+            prev = check.toordinal() - 1
+            check = date.fromordinal(prev)
+        else:
+            break
+    return streak
+
+
+def sorted_thoughts(thoughts):
+    """Pinned thoughts always first, rest in original order."""
+    pinned = [t for t in thoughts if t.get("pinned")]
+    rest   = [t for t in thoughts if not t.get("pinned")]
+    return pinned + rest
+
+
 def fmt_thought(t, idx):
     ts = t["timestamp"][:16].replace("T", " ")
     c, icon = CAT_META.get(t["category"], (WHITE, "•"))
     tag = f"{c}{BOLD}[{icon} {t['category']}]{RESET}"
-    return f"  {GRAY}{idx:>3}.{RESET} {tag} {WHITE}{t['text']}{RESET}  {DIM}{ts}{RESET}"
+    pin = f" {PIN_ICON}" if t.get("pinned") else ""
+    return f"  {GRAY}{idx:>3}.{RESET} {tag}{pin} {WHITE}{t['text']}{RESET}  {DIM}{ts}{RESET}"
 
 
 def dump_mode(thoughts):
@@ -104,7 +129,7 @@ def dump_mode(thoughts):
             break
         if not raw:
             continue
-        t = {"text": raw, "category": classify(raw), "timestamp": datetime.now().isoformat()}
+        t = {"text": raw, "category": classify(raw), "timestamp": datetime.now().isoformat(), "pinned": False}
         thoughts.append(t)
         c, icon = CAT_META.get(t["category"], (WHITE, "•"))
         print(f"  {DIM}↳ {c}{icon} {t['category']}{RESET}\n")
@@ -117,8 +142,9 @@ def view_all(thoughts):
     if not thoughts:
         print(f"\n  {DIM}nothing here yet.{RESET}\n")
         return
-    print(f"\n  {BOLD}everything ({len(thoughts)} thoughts):{RESET}\n")
-    for i, t in enumerate(reversed(thoughts), 1):
+    display = list(reversed(sorted_thoughts(thoughts)))
+    print(f"\n  {BOLD}everything ({len(display)} thoughts):{RESET}\n")
+    for i, t in enumerate(display, 1):
         print(fmt_thought(t, i))
     print()
 
@@ -136,7 +162,8 @@ def view_by_category(thoughts):
         print(f"  {GRAY}{'─' * 38}{RESET}")
         for t in reversed(items[-10:]):
             ts = t["timestamp"][:16].replace("T", " ")
-            print(f"  {WHITE}{t['text']}{RESET}  {DIM}{ts}{RESET}")
+            pin = f" {PIN_ICON}" if t.get("pinned") else ""
+            print(f"  {WHITE}{t['text']}{RESET}{pin}  {DIM}{ts}{RESET}")
     print()
 
 
@@ -154,9 +181,9 @@ def search_mode(thoughts):
     if not results:
         print(f"\n  {DIM}no matches for '{query}'{RESET}\n")
         return
+    display = list(reversed(sorted_thoughts(thoughts)))
     print(f"\n  {BOLD}{len(results)} result{'s' if len(results) != 1 else ''} for '{query}':{RESET}\n")
-    # show with original indices so delete works without confusion
-    for i, t in enumerate(reversed(thoughts), 1):
+    for i, t in enumerate(display, 1):
         if t in results:
             highlighted = re.sub(
                 f"({re.escape(query)})",
@@ -167,34 +194,80 @@ def search_mode(thoughts):
             ts = t["timestamp"][:16].replace("T", " ")
             c, icon = CAT_META.get(t["category"], (WHITE, "•"))
             tag = f"{c}{BOLD}[{icon} {t['category']}]{RESET}"
-            print(f"  {GRAY}{i:>3}.{RESET} {tag} {WHITE}{highlighted}{RESET}  {DIM}{ts}{RESET}")
+            pin = f" {PIN_ICON}" if t.get("pinned") else ""
+            print(f"  {GRAY}{i:>3}.{RESET} {tag}{pin} {WHITE}{highlighted}{RESET}  {DIM}{ts}{RESET}")
     print()
+
+
+def _pick_thought(thoughts, prompt):
+    """Show list, ask for a number, return (real_index, thought) or (None, None)."""
+    view_all(thoughts)
+    try:
+        raw = input(f"  {BOLD}{prompt} (or 'cancel'):{RESET} ").strip().lower()
+    except EOFError:
+        return None, None
+    if raw in ("cancel", "c", "q", ""):
+        print(f"  cancelled.\n")
+        return None, None
+    try:
+        idx = int(raw)
+        display = list(reversed(sorted_thoughts(thoughts)))
+        if not (1 <= idx <= len(display)):
+            raise ValueError
+        t = display[idx - 1]
+        real_idx = thoughts.index(t)
+        return real_idx, t
+    except ValueError:
+        print(f"  {RED}invalid number.{RESET}\n")
+        return None, None
+
+
+def edit_mode(thoughts):
+    if not thoughts:
+        print(f"\n  {DIM}nothing to edit yet.{RESET}\n")
+        return
+    real_idx, t = _pick_thought(thoughts, "enter number to edit")
+    if t is None:
+        return
+    print(f"\n  {DIM}editing:{RESET} {WHITE}{t['text']}{RESET}")
+    try:
+        new_text = input(f"  {BOLD}new text:{RESET} ").strip()
+    except EOFError:
+        return
+    if not new_text:
+        print(f"  cancelled.\n")
+        return
+    thoughts[real_idx]["text"] = new_text
+    thoughts[real_idx]["category"] = classify(new_text)
+    thoughts[real_idx]["edited"] = datetime.now().isoformat()
+    c, icon = CAT_META.get(thoughts[real_idx]["category"], (WHITE, "•"))
+    print(f"  {DIM}↳ re-tagged as {c}{icon} {thoughts[real_idx]['category']}{RESET}\n")
+    save(thoughts)
+    print(f"  {GREEN}updated.{RESET}\n")
+
+
+def pin_mode(thoughts):
+    if not thoughts:
+        print(f"\n  {DIM}nothing to pin yet.{RESET}\n")
+        return
+    real_idx, t = _pick_thought(thoughts, "enter number to pin/unpin")
+    if t is None:
+        return
+    thoughts[real_idx]["pinned"] = not thoughts[real_idx].get("pinned", False)
+    state = "pinned 📌" if thoughts[real_idx]["pinned"] else "unpinned"
+    save(thoughts)
+    print(f"  {GREEN}{state}:{RESET} {WHITE}{t['text']}{RESET}\n")
 
 
 def delete_mode(thoughts):
     if not thoughts:
         print(f"\n  {DIM}nothing to delete.{RESET}\n")
         return
-    view_all(thoughts)
-    try:
-        raw = input(f"  {RED}enter number to delete (or 'cancel'):{RESET} ").strip().lower()
-    except EOFError:
+    real_idx, t = _pick_thought(thoughts, "enter number to delete")
+    if t is None:
         return
-    if raw in ("cancel", "c", "q", ""):
-        print(f"  cancelled.\n")
-        return
-    try:
-        idx = int(raw)
-        if not (1 <= idx <= len(thoughts)):
-            raise ValueError
-    except ValueError:
-        print(f"  {RED}invalid number.{RESET}\n")
-        return
-    # view_all shows thoughts in reverse, so map back to original index
-    real_idx = len(thoughts) - idx
-    removed = thoughts[real_idx]
-    c, icon = CAT_META.get(removed["category"], (WHITE, "•"))
-    print(f"\n  {DIM}deleting: {c}{icon}{RESET} {WHITE}{removed['text']}{RESET}")
+    c, icon = CAT_META.get(t["category"], (WHITE, "•"))
+    print(f"\n  {DIM}deleting:{RESET} {c}{icon}{RESET} {WHITE}{t['text']}{RESET}")
     confirm = input(f"  {RED}sure? (yes/no):{RESET} ").strip().lower()
     if confirm == "yes":
         thoughts.pop(real_idx)
@@ -221,6 +294,10 @@ def stats(thoughts):
         bar = "█" * (pct // 5)
         print(f"  {c}{icon} {cat:<8}{RESET}  {WHITE}{bar:<20}{RESET}  {DIM}{n} ({pct}%){RESET}")
 
+    streak = get_streak(thoughts)
+    if streak:
+        print(f"\n  {YELLOW}🔥 {streak}-day streak{RESET}")
+
     oldest = thoughts[0]
     print(f"\n  {DIM}first thought logged {oldest['timestamp'][:10]}{RESET}")
     print(f"  {DIM}it was: \"{oldest['text'][:60]}\"{RESET}\n")
@@ -236,8 +313,14 @@ def export_markdown(thoughts):
         f"\n_{datetime.now().strftime('%Y-%m-%d %H:%M')}_\n",
     ]
     icons = {"TODO": "✅", "IDEA": "💡", "FEELING": "💭", "RANDOM": "🌀"}
+    pinned = [t for t in thoughts if t.get("pinned")]
+    if pinned:
+        lines.append("\n## 📌 pinned\n")
+        for t in pinned:
+            ts = t["timestamp"][:16].replace("T", " ")
+            lines.append(f"- {t['text']}  _{ts}_")
     for cat in ["TODO", "IDEA", "FEELING", "RANDOM"]:
-        items = [t for t in thoughts if t["category"] == cat]
+        items = [t for t in thoughts if t["category"] == cat and not t.get("pinned")]
         if not items:
             continue
         lines.append(f"\n## {icons[cat]} {cat.lower()}\n")
@@ -274,11 +357,14 @@ def header(thoughts):
             if n:
                 c, icon = CAT_META[cat]
                 parts.append(f"{c}{icon} {n}{RESET}")
-        print(f"  {' · '.join(parts)}  {DIM}({total} total){RESET}\n")
+        streak = get_streak(thoughts)
+        streak_str = f"  {YELLOW}🔥 {streak}d{RESET}" if streak >= 2 else ""
+        print(f"  {' · '.join(parts)}  {DIM}({total} total){RESET}{streak_str}\n")
 
     print(f"  {GREEN}d{RESET} dump   {GREEN}v{RESET} view all   {GREEN}c{RESET} by category")
     print(f"  {GREEN}s{RESET} stats  {GREEN}/{RESET} search     {GREEN}e{RESET} export")
-    print(f"  {GREEN}r{RESET} delete {GREEN}x{RESET} clear      {GREEN}q{RESET} quit")
+    print(f"  {GREEN}u{RESET} edit   {GREEN}p{RESET} pin        {GREEN}r{RESET} delete")
+    print(f"  {GREEN}x{RESET} clear  {GREEN}q{RESET} quit")
     print(f"  {GRAY}{'─' * 36}{RESET}")
 
 
@@ -304,6 +390,12 @@ def main():
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "/":
             search_mode(thoughts)
+            input(f"  {DIM}enter to go back{RESET}")
+        elif choice == "u":
+            edit_mode(thoughts)
+            input(f"  {DIM}enter to go back{RESET}")
+        elif choice == "p":
+            pin_mode(thoughts)
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "r":
             delete_mode(thoughts)
