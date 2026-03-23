@@ -31,17 +31,21 @@ python 3.8+. no installs. no dependencies. nothing.
   d dump   v view all   c by category
   s stats  / search     e export
   u edit   p pin        r delete
-  x clear  q quit
+  z undo   x clear      q quit
 ```
 
-hit `d` and just type:
+hit `d` and just type. you'll get a daily prompt to get things moving:
 
 ```
+  just type. hit enter after each thought. 'done' when you're done.
+  prompt: what's been sitting in your head rent-free?
+  tip: start with !todo !idea !feeling !random to force a tag
+
   > need to reply to that email from tuesday
   ↳ ✅ TODO
 
-  > what if notes apps just didn't exist and we were all fine
-  ↳ 💡 IDEA
+  > !idea something like rawthoughts but for voice memos
+  ↳ 💡 IDEA  (forced)
 
   > feeling kind of burnt out honestly
   ↳ 💭 FEELING
@@ -56,39 +60,51 @@ hit `d` and just type:
 
 | key | what it does |
 |-----|-------------|
-| `d` | dump mode — just type until you're empty |
+| `d` | dump mode — type until empty. includes a daily prompt to spark things. |
 | `v` | everything, newest first. pinned thoughts float to the top. |
 | `c` | grouped by tag |
-| `s` | breakdown of what's in your head + streak |
+| `s` | breakdown by tag, streak, and your most-used words |
 | `/` | search across all your thoughts, matches highlighted |
 | `u` | edit a thought by number — re-tags automatically |
 | `p` | pin / unpin a thought so it stays at the top |
 | `r` | delete a thought by number |
+| `z` | undo the last delete or add (session only) |
 | `e` | export to a markdown file |
 | `x` | wipe it all. fresh start. |
 | `q` | quit (saves automatically) |
 
 ---
 
-## how tagging works
+## tag overrides
+
+by default rawthoughts guesses the tag. but you can force it by starting your thought with a prefix:
+
+| prefix | tag |
+|--------|-----|
+| `!todo` or `!t` | ✅ TODO |
+| `!idea` or `!i` | 💡 IDEA |
+| `!feeling` or `!f` | 💭 FEELING |
+| `!random` or `!r` | 🌀 RANDOM |
+
+the prefix gets stripped — only the actual thought is saved.
+
+---
+
+## how auto-tagging works
 
 it scans your text for keywords using word-boundary matching, so "fixed" won't accidentally trigger "fix". multi-word phrases like "need to" or "what if" score double, so longer matches win over coincidental single-word hits. if nothing sticks, it goes to **random**.
-
-roughly what each tag looks for:
 
 - **todo** — "need to", "gotta", "fix", "remind", "schedule", "don't forget" …
 - **idea** — "what if", "would be cool", "build", "startup" …
 - **feeling** — "feel", "tired", "anxious", "grateful", "overwhelmed" …
 - **random** — everything else. often the best stuff.
 
-it's intentionally simple. the point is speed, not a perfect classifier.
-
 ---
 
 ## files it creates
 
 - `.rawthoughts.json` — where your thoughts live. hidden, local, yours.
-- `rawthoughts_export.md` — only appears when you hit `e` to export. pinned thoughts get their own section at the top.
+- `rawthoughts_export.md` — only appears when you hit `e`. pinned thoughts get their own section at the top.
 
 ---
 
