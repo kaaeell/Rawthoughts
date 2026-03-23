@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+import random
 from datetime import datetime, date
 
 SAVE_FILE = os.path.join(os.path.dirname(__file__), ".rawthoughts.json")
@@ -57,7 +58,50 @@ CAT_META = {
     "RANDOM":  (YELLOW,  "🌀"),
 }
 
+TAG_OVERRIDES = {
+    "!todo":    "TODO",
+    "!idea":    "IDEA",
+    "!feeling": "FEELING",
+    "!random":  "RANDOM",
+    "!t":       "TODO",
+    "!i":       "IDEA",
+    "!f":       "FEELING",
+    "!r":       "RANDOM",
+}
+
 PIN_ICON = f"{YELLOW}📌{RESET}"
+
+STOP_WORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+    "of", "with", "it", "is", "was", "i", "my", "me", "so", "just", "like",
+    "that", "this", "be", "do", "not", "its", "if", "as", "up", "by", "are",
+    "have", "had", "from", "about", "what", "we", "they", "he", "she", "you",
+    "his", "her", "their", "our", "been", "s", "t", "re", "ve", "ll", "d",
+}
+
+DAILY_PROMPTS = [
+    "what's the one thing you keep putting off?",
+    "what did you almost say today but didn't?",
+    "what would make tomorrow feel like a win?",
+    "what's been sitting in your head rent-free?",
+    "what's something small that actually bothered you today?",
+    "what are you pretending not to know?",
+    "what would you do differently if no one was watching?",
+    "what's a problem you haven't named yet?",
+    "what made you lose track of time recently?",
+    "what's something you want to remember from this week?",
+    "if you could fix one thing right now, what would it be?",
+    "what's a thought you've been avoiding?",
+    "what do you actually want?",
+    "what's draining you that you haven't dealt with?",
+    "what idea keeps coming back?",
+]
+
+
+def get_daily_prompt():
+    # seed by date so it's consistent within a day but changes daily
+    random.seed(date.today().toordinal())
+    return random.choice(DAILY_PROMPTS)
 
 
 def classify(text):
@@ -73,6 +117,16 @@ def classify(text):
     return best if scores[best] > 0 else "RANDOM"
 
 
+def parse_override(raw):
+    """Check if text starts with a tag override prefix. Returns (clean_text, category_or_None)."""
+    for prefix, cat in TAG_OVERRIDES.items():
+        if raw.lower().startswith(prefix + " "):
+            return raw[len(prefix):].strip(), cat
+        if raw.lower() == prefix:
+            return "", cat
+    return raw, None
+
+
 def load():
     if os.path.exists(SAVE_FILE):
         with open(SAVE_FILE) as f:
@@ -86,7 +140,6 @@ def save(thoughts):
 
 
 def get_streak(thoughts):
-    """Count consecutive days (ending today) that have at least one thought."""
     if not thoughts:
         return 0
     days = sorted({t["timestamp"][:10] for t in thoughts}, reverse=True)
@@ -95,15 +148,13 @@ def get_streak(thoughts):
     for d in days:
         if date.fromisoformat(d) == check:
             streak += 1
-            prev = check.toordinal() - 1
-            check = date.fromordinal(prev)
+            check = date.fromordinal(check.toordinal() - 1)
         else:
             break
     return streak
 
 
 def sorted_thoughts(thoughts):
-    """Pinned thoughts always first, rest in original order."""
     pinned = [t for t in thoughts if t.get("pinned")]
     rest   = [t for t in thoughts if not t.get("pinned")]
     return pinned + rest
@@ -117,8 +168,21 @@ def fmt_thought(t, idx):
     return f"  {GRAY}{idx:>3}.{RESET} {tag}{pin} {WHITE}{t['text']}{RESET}  {DIM}{ts}{RESET}"
 
 
-def dump_mode(thoughts):
-    print(f"\n  {BOLD}just type. hit enter after each thought. 'done' when you're done.{RESET}\n")
+def top_words(thoughts, n=10):
+    freq = {}
+    for t in thoughts:
+        for word in re.findall(r"[a-z']+", t["text"].lower()):
+            word = word.strip("'")
+            if word and word not in STOP_WORDS and len(word) > 2:
+                freq[word] = freq.get(word, 0) + 1
+    return sorted(freq.items(), key=lambda x: x[1], reverse=True)[:n]
+
+
+def dump_mode(thoughts, undo_stack):
+    prompt = get_daily_prompt()
+    print(f"\n  {BOLD}just type. hit enter after each thought. 'done' when you're done.{RESET}")
+    print(f"  {DIM}prompt: {CYAN}{prompt}{RESET}")
+    print(f"  {DIM}tip: start with !todo !idea !feeling !random to force a tag{RESET}\n")
     added = 0
     while True:
         try:
@@ -129,10 +193,21 @@ def dump_mode(thoughts):
             break
         if not raw:
             continue
-        t = {"text": raw, "category": classify(raw), "timestamp": datetime.now().isoformat(), "pinned": False}
+        text, override = parse_override(raw)
+        if not text:
+            continue
+        category = override if override else classify(text)
+        t = {
+            "text": text,
+            "category": category,
+            "timestamp": datetime.now().isoformat(),
+            "pinned": False,
+        }
         thoughts.append(t)
-        c, icon = CAT_META.get(t["category"], (WHITE, "•"))
-        print(f"  {DIM}↳ {c}{icon} {t['category']}{RESET}\n")
+        undo_stack.append(("add", len(thoughts) - 1, t))
+        c, icon = CAT_META.get(category, (WHITE, "•"))
+        forced = f"  {DIM}(forced){RESET}" if override else ""
+        print(f"  {DIM}↳ {c}{icon} {category}{RESET}{forced}\n")
         added += 1
     save(thoughts)
     print(f"\n  {GREEN}saved {added} thought{'s' if added != 1 else ''}{RESET}\n")
@@ -200,7 +275,6 @@ def search_mode(thoughts):
 
 
 def _pick_thought(thoughts, prompt):
-    """Show list, ask for a number, return (real_index, thought) or (None, None)."""
     view_all(thoughts)
     try:
         raw = input(f"  {BOLD}{prompt} (or 'cancel'):{RESET} ").strip().lower()
@@ -237,8 +311,12 @@ def edit_mode(thoughts):
     if not new_text:
         print(f"  cancelled.\n")
         return
-    thoughts[real_idx]["text"] = new_text
-    thoughts[real_idx]["category"] = classify(new_text)
+    text, override = parse_override(new_text)
+    if not text:
+        print(f"  cancelled.\n")
+        return
+    thoughts[real_idx]["text"] = text
+    thoughts[real_idx]["category"] = override if override else classify(text)
     thoughts[real_idx]["edited"] = datetime.now().isoformat()
     c, icon = CAT_META.get(thoughts[real_idx]["category"], (WHITE, "•"))
     print(f"  {DIM}↳ re-tagged as {c}{icon} {thoughts[real_idx]['category']}{RESET}\n")
@@ -259,7 +337,7 @@ def pin_mode(thoughts):
     print(f"  {GREEN}{state}:{RESET} {WHITE}{t['text']}{RESET}\n")
 
 
-def delete_mode(thoughts):
+def delete_mode(thoughts, undo_stack):
     if not thoughts:
         print(f"\n  {DIM}nothing to delete.{RESET}\n")
         return
@@ -270,11 +348,33 @@ def delete_mode(thoughts):
     print(f"\n  {DIM}deleting:{RESET} {c}{icon}{RESET} {WHITE}{t['text']}{RESET}")
     confirm = input(f"  {RED}sure? (yes/no):{RESET} ").strip().lower()
     if confirm == "yes":
+        undo_stack.append(("delete", real_idx, t))
         thoughts.pop(real_idx)
         save(thoughts)
-        print(f"  {DIM}gone.{RESET}\n")
+        print(f"  {DIM}gone. press 'z' from the menu to undo.{RESET}\n")
     else:
         print(f"  cancelled.\n")
+
+
+def undo_mode(thoughts, undo_stack):
+    if not undo_stack:
+        print(f"\n  {DIM}nothing to undo.{RESET}\n")
+        return
+    action, idx, t = undo_stack.pop()
+    if action == "delete":
+        thoughts.insert(idx, t)
+        save(thoughts)
+        c, icon = CAT_META.get(t["category"], (WHITE, "•"))
+        print(f"\n  {GREEN}restored:{RESET} {c}{icon}{RESET} {WHITE}{t['text']}{RESET}\n")
+    elif action == "add":
+        if idx < len(thoughts) and thoughts[idx] is t:
+            thoughts.pop(idx)
+            save(thoughts)
+            print(f"\n  {GREEN}undone:{RESET} {WHITE}{t['text']}{RESET}\n")
+        else:
+            print(f"\n  {DIM}can't undo that one — thought was modified.{RESET}\n")
+    else:
+        print(f"\n  {DIM}nothing to undo.{RESET}\n")
 
 
 def stats(thoughts):
@@ -297,6 +397,14 @@ def stats(thoughts):
     streak = get_streak(thoughts)
     if streak:
         print(f"\n  {YELLOW}🔥 {streak}-day streak{RESET}")
+
+    words = top_words(thoughts)
+    if words:
+        print(f"\n  {BOLD}top words:{RESET}")
+        max_count = words[0][1]
+        for word, count in words:
+            bar = "█" * max(1, round((count / max_count) * 12))
+            print(f"  {CYAN}{word:<14}{RESET} {WHITE}{bar:<12}{RESET}  {DIM}{count}x{RESET}")
 
     oldest = thoughts[0]
     print(f"\n  {DIM}first thought logged {oldest['timestamp'][:10]}{RESET}")
@@ -364,12 +472,14 @@ def header(thoughts):
     print(f"  {GREEN}d{RESET} dump   {GREEN}v{RESET} view all   {GREEN}c{RESET} by category")
     print(f"  {GREEN}s{RESET} stats  {GREEN}/{RESET} search     {GREEN}e{RESET} export")
     print(f"  {GREEN}u{RESET} edit   {GREEN}p{RESET} pin        {GREEN}r{RESET} delete")
-    print(f"  {GREEN}x{RESET} clear  {GREEN}q{RESET} quit")
+    print(f"  {GREEN}z{RESET} undo   {GREEN}x{RESET} clear      {GREEN}q{RESET} quit")
     print(f"  {GRAY}{'─' * 36}{RESET}")
 
 
 def main():
     thoughts = load()
+    undo_stack = []  # session-only, not persisted
+
     while True:
         os.system("cls" if os.name == "nt" else "clear")
         header(thoughts)
@@ -377,7 +487,7 @@ def main():
         choice = input("\n  > ").strip().lower()
 
         if choice == "d":
-            dump_mode(thoughts)
+            dump_mode(thoughts, undo_stack)
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "v":
             view_all(thoughts)
@@ -398,7 +508,10 @@ def main():
             pin_mode(thoughts)
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "r":
-            delete_mode(thoughts)
+            delete_mode(thoughts, undo_stack)
+            input(f"  {DIM}enter to go back{RESET}")
+        elif choice == "z":
+            undo_mode(thoughts, undo_stack)
             input(f"  {DIM}enter to go back{RESET}")
         elif choice == "e":
             export_markdown(thoughts)
